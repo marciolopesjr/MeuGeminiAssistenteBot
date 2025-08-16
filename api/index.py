@@ -47,6 +47,9 @@ model = genai.GenerativeModel('gemini-1.5-flash')
 
 # Aplicação python-telegram-bot
 application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+# Inicializa a aplicação para registrar os handlers e preparar para processar updates.
+# Isso corrige o erro 'Application not initialized' no simulador.
+asyncio.run(application.initialize())
 
 # Aplicação Flask
 app = Flask(__name__)
@@ -176,6 +179,9 @@ ADMIN_PANEL_TEMPLATE = """
     <div class="card" id="webhook-card">
         <h2>Webhook Status</h2>
         <button id="check-webhook-btn">Check Webhook Status Now</button>
+        <form action="{{ url_for('set_webhook') }}" method="post" style="display: inline-block; margin-left: 1em;">
+            <input type="submit" value="Set Webhook Automatically" style="background: #f39c12; border-color: #f39c12;">
+        </form>
         <pre id="webhook-info-pre" style="background: #eef; padding: 1em; border-radius: 4px; white-space: pre-wrap; word-wrap: break-word; margin-top: 1em;">Click the button to fetch webhook info...</pre>
     </div>
 
@@ -277,6 +283,37 @@ def get_webhook_info():
     """Endpoint da API para fornecer informações do webhook."""
     data = asyncio.run(get_webhook_info_data())
     return jsonify(data)
+
+@app.route('/admin/set_webhook', methods=['POST'])
+@login_required
+def set_webhook():
+    """Configura o webhook da aplicação no Telegram."""
+    vercel_url = os.environ.get('VERCEL_URL')
+    if not vercel_url:
+        flash("A variável de ambiente VERCEL_URL não foi encontrada. Esta função só pode ser usada no ambiente da Vercel.", "error")
+        return redirect(url_for('admin_panel'))
+
+    webhook_url = f"https://{vercel_url}/{TELEGRAM_BOT_TOKEN}"
+
+    async def do_set_webhook():
+        """Helper assíncrono para configurar o webhook com uma instância de bot temporária."""
+        try:
+            logger.info(f"Configurando webhook para a URL: {webhook_url}")
+            temp_bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
+            async with temp_bot:
+                success = await temp_bot.set_webhook(url=webhook_url)
+            if success:
+                flash(f"Webhook configurado com sucesso para: {webhook_url}", "success")
+                logger.info("Webhook configurado com sucesso.")
+            else:
+                flash("A API do Telegram retornou uma falha ao configurar o webhook.", "error")
+                logger.error("Falha ao configurar webhook, API retornou 'false'.")
+        except Exception as e:
+            logger.error(f"Falha ao configurar o webhook: {e}", exc_info=True)
+            flash(f"Falha ao configurar o webhook: {e}", "error")
+
+    asyncio.run(do_set_webhook())
+    return redirect(url_for('admin_panel'))
 
 @app.route('/admin/simulate', methods=['POST'])
 @login_required
