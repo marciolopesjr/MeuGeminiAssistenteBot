@@ -49,6 +49,7 @@ app = Flask(__name__)
 async def start(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
     """Envia uma mensagem de boas-vindas quando o comando /start é emitido."""
     chat_id = update.message.chat.id
+    logger.info(f"Handler 'start' ativado para o chat {chat_id}.")
     welcome_message = (
         "Olá! Eu sou seu assistente multimodal com a tecnologia Gemini.\n\n"
         "Posso fazer o seguinte:\n"
@@ -60,101 +61,151 @@ async def start(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
         "Basta me enviar qualquer um desses tipos de mídia e eu farei o meu melhor para ajudar!"
     )
     await context.bot.send_message(chat_id=chat_id, text=welcome_message)
+    logger.info(f"Mensagem de boas-vindas enviada para o chat {chat_id}.")
 
 
 async def handle_text(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     text = update.message.text
-    logger.info(f"Processando texto de {chat_id}: '{text}'")
+    logger.info(f"Handler 'text' ativado para o chat {chat_id}: '{text}'")
 
-    response = model.generate_content(text)
-    await context.bot.send_message(chat_id=chat_id, text=response.text)
+    try:
+        logger.info("Enviando prompt de texto para a API Gemini...")
+        response = model.generate_content(text)
+        logger.info("Resposta da API Gemini recebida.")
+
+        await context.bot.send_message(chat_id=chat_id, text=response.text)
+        logger.info(f"Resposta de texto enviada para o chat {chat_id}.")
+    except Exception as e:
+        logger.error(f"Erro no handler de texto: {e}", exc_info=True)
+        await context.bot.send_message(chat_id=chat_id, text="Desculpe, ocorreu um erro ao processar sua mensagem.")
 
 async def handle_photo(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
-    logger.info(f"Processando foto de {chat_id}")
+    logger.info(f"Handler 'photo' ativado para o chat {chat_id}.")
 
-    photo_file = await context.bot.get_file(update.message.photo[-1].file_id)
+    try:
+        await context.bot.send_message(chat_id=chat_id, text="Analisando a imagem...")
+        photo_file = await context.bot.get_file(update.message.photo[-1].file_id)
 
-    f = io.BytesIO()
-    await photo_file.download_to_memory(f)
-    f.seek(0)
+        f = io.BytesIO()
+        await photo_file.download_to_memory(f)
+        f.seek(0)
 
-    img = PIL.Image.open(f)
-    prompt_text = "Descreva esta imagem em detalhes. O que você vê?"
+        img = PIL.Image.open(f)
+        prompt_text = "Descreva esta imagem em detalhes. O que você vê?"
 
-    response = model.generate_content([prompt_text, img])
-    await context.bot.send_message(chat_id=chat_id, text=response.text)
+        logger.info("Enviando imagem para a API Gemini...")
+        response = model.generate_content([prompt_text, img])
+        logger.info("Resposta da API Gemini recebida.")
+
+        await context.bot.send_message(chat_id=chat_id, text=response.text)
+        logger.info(f"Descrição da imagem enviada para o chat {chat_id}.")
+    except Exception as e:
+        logger.error(f"Erro no handler de foto: {e}", exc_info=True)
+        await context.bot.send_message(chat_id=chat_id, text="Desculpe, ocorreu um erro ao analisar a imagem.")
 
 async def handle_media(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE, media_type: str):
     chat_id = update.message.chat.id
-    logger.info(f"Processando {media_type} de {chat_id}")
+    logger.info(f"Handler '{media_type}' ativado para o chat {chat_id}.")
 
-    if media_type == 'audio':
-        file_id = update.message.voice.file_id if update.message.voice else update.message.audio.file_id
-        file_extension = "ogg" if update.message.voice else update.message.audio.file_name.split('.')[-1]
-        prompt = "Transcreva o áudio deste arquivo na íntegra."
-        processing_message = "Processando o áudio..."
-    elif media_type == 'video':
-        file_id = update.message.video.file_id
-        file_extension = "mp4"
-        prompt = "Resuma este vídeo em três pontos principais. Descreva o que acontece visualmente e o que é dito."
-        processing_message = "Processando o vídeo... Isso pode levar alguns instantes."
-    else:
-        return
-
-    file_path = f"/tmp/{file_id}.{file_extension}"
+    file_path = None
     gemini_file = None
 
     try:
+        if media_type == 'audio':
+            file_id = update.message.voice.file_id if update.message.voice else update.message.audio.file_id
+            file_extension = "ogg" if update.message.voice else update.message.audio.file_name.split('.')[-1]
+            prompt = "Transcreva o áudio deste arquivo na íntegra."
+            processing_message = "Processando o áudio..."
+        elif media_type == 'video':
+            file_id = update.message.video.file_id
+            file_extension = "mp4"
+            prompt = "Resuma este vídeo em três pontos principais. Descreva o que acontece visualmente e o que é dito."
+            processing_message = "Processando o vídeo... Isso pode levar alguns instantes."
+        else:
+            logger.warning(f"Tipo de mídia desconhecido em handle_media: {media_type}")
+            return
+
         await context.bot.send_message(chat_id=chat_id, text=processing_message)
+
         tg_file = await context.bot.get_file(file_id)
+        file_path = f"/tmp/{file_id}.{file_extension}"
+        logger.info(f"Baixando arquivo para {file_path}...")
         await tg_file.download_to_drive(file_path)
+        logger.info("Download concluído.")
 
-        logger.info(f"Fazendo upload do arquivo {file_path} para a API Gemini.")
+        logger.info(f"Fazendo upload do arquivo {file_path} para a API Gemini File...")
         gemini_file = genai.upload_file(path=file_path)
+        logger.info(f"Upload para a API Gemini concluído. File name: {gemini_file.name}")
 
+        logger.info(f"Enviando prompt de {media_type} para a API Gemini...")
         response = model.generate_content([prompt, gemini_file])
+        logger.info(f"Resposta da API Gemini recebida.")
 
         await context.bot.send_message(chat_id=chat_id, text=f"Análise do {media_type}:\n{response.text}")
-        logger.info(f"Análise de {media_type} enviada para {chat_id}.")
+        logger.info(f"Análise de {media_type} enviada para o chat {chat_id}.")
+
+    except Exception as e:
+        logger.error(f"Erro no handler de {media_type}: {e}", exc_info=True)
+        await context.bot.send_message(chat_id=chat_id, text=f"Desculpe, ocorreu um erro ao processar o {media_type}.")
 
     finally:
-        if os.path.exists(file_path):
+        if file_path and os.path.exists(file_path):
+            logger.info(f"Limpando arquivo temporário: {file_path}")
             os.remove(file_path)
-        # Limpar o arquivo da API Gemini após o uso para gerenciar o armazenamento
         if gemini_file:
+            logger.info(f"Deletando arquivo da API Gemini: {gemini_file.name}")
             genai.delete_file(gemini_file.name)
 
 async def handle_document(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     document = update.message.document
 
-    if document.mime_type!= 'application/pdf':
+    if document.mime_type != 'application/pdf':
+        logger.warning(f"Usuário {chat_id} enviou arquivo com MimeType incorreto: {document.mime_type}")
         await context.bot.send_message(chat_id=chat_id, text="Por favor, envie um arquivo no formato PDF.")
         return
 
-    logger.info(f"Processando PDF de {chat_id}: {document.file_name}")
-    await context.bot.send_message(chat_id=chat_id, text=f"Analisando o PDF '{document.file_name}'...")
+    logger.info(f"Handler 'document' (PDF) ativado para o chat {chat_id}: {document.file_name}")
 
-    doc_file = await context.bot.get_file(document.file_id)
-    pdf_bytes = io.BytesIO()
-    await doc_file.download_to_memory(pdf_bytes)
-    pdf_bytes.seek(0)
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=f"Analisando o PDF '{document.file_name}'...")
 
-    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-    extracted_text = "".join([page.get_text("text") for page in doc])
+        logger.info("Baixando arquivo PDF para a memória...")
+        doc_file = await context.bot.get_file(document.file_id)
+        pdf_bytes = io.BytesIO()
+        await doc_file.download_to_memory(pdf_bytes)
+        pdf_bytes.seek(0)
+        logger.info("Download do PDF para a memória concluído.")
 
-    if not extracted_text.strip():
-        await context.bot.send_message(chat_id=chat_id, text="O PDF parece não conter texto extraível.")
-        return
+        logger.info("Extraindo texto do PDF com PyMuPDF...")
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        extracted_text = "".join([page.get_text("text") for page in doc])
+        logger.info(f"Texto extraído com sucesso. Total de {len(extracted_text)} caracteres.")
 
-    prompt = f"Resuma o seguinte texto extraído de um documento PDF. Identifique os pontos principais e conclusões:\n\n{extracted_text[:10000]}" # Limita o tamanho do prompt
-    response = model.generate_content(prompt)
+        if not extracted_text.strip():
+            logger.warning(f"O PDF '{document.file_name}' não contém texto extraível.")
+            await context.bot.send_message(chat_id=chat_id, text="O PDF parece não conter texto extraível.")
+            return
 
-    response_text = f"Resumo do PDF:\n\n{response.text}"
-    for i in range(0, len(response_text), 4096):
-        await context.bot.send_message(chat_id=chat_id, text=response_text[i:i+4096])
+        prompt = f"Resuma o seguinte texto extraído de um documento PDF. Identifique os pontos principais e conclusões:\n\n{extracted_text[:10000]}" # Limita o tamanho do prompt
+
+        logger.info("Enviando texto extraído do PDF para a API Gemini...")
+        response = model.generate_content(prompt)
+        logger.info("Resposta da API Gemini recebida.")
+
+        response_text = f"Resumo do PDF '{document.file_name}':\n\n{response.text}"
+
+        logger.info(f"Enviando resumo do PDF para o chat {chat_id}.")
+        # Telegram tem um limite de 4096 caracteres por mensagem
+        for i in range(0, len(response_text), 4096):
+            await context.bot.send_message(chat_id=chat_id, text=response_text[i:i+4096])
+        logger.info("Resumo do PDF enviado com sucesso.")
+
+    except Exception as e:
+        logger.error(f"Erro no handler de documento: {e}", exc_info=True)
+        await context.bot.send_message(chat_id=chat_id, text="Desculpe, ocorreu um erro ao analisar o PDF.")
 
 # --- Manipulador de Erros ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -184,8 +235,24 @@ application.add_error_handler(error_handler)
 # --- Endpoint do Webhook (Flask) ---
 @app.route(f'/{TELEGRAM_BOT_TOKEN}', methods=['POST'])
 def webhook():
-    update = telegram.Update.de_json(request.get_json(force=True), application.bot)
-    asyncio.run(application.process_update(update))
+    """Endpoint que recebe as atualizações do Telegram."""
+    logger.info("--- Webhook Invocado ---")
+    try:
+        request_json = request.get_json(force=True)
+        logger.info(f"Request JSON: {json.dumps(request_json, indent=2, ensure_ascii=False)}")
+
+        update = telegram.Update.de_json(request_json, application.bot)
+        logger.info("Update deserializado com sucesso.")
+
+        asyncio.run(application.process_update(update))
+        logger.info("Processamento do update concluído.")
+
+    except json.JSONDecodeError:
+        logger.error("Erro ao decodificar JSON do request.")
+    except Exception as e:
+        logger.error(f"Erro inesperado no webhook: {e}", exc_info=True)
+
+    logger.info("--- Webhook Finalizado ---")
     return 'ok'
 
 @app.route('/')
