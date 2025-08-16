@@ -1,0 +1,6 @@
+google-generativeai
+python-telegram-bot[webhooks]
+Flask
+python-dotenv
+PyMuPDF
+Pillow
