@@ -42,7 +42,7 @@ if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
 # --- Inicialização dos Serviços ---
 # API Gemini
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash')
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 # Aplicação python-telegram-bot
 application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -145,6 +145,31 @@ ADMIN_PANEL_TEMPLATE = """
       <p>A aplicação está rodando em um ambiente serverless. Os logs detalhados não podem ser exibidos aqui diretamente.</p>
       <p>Para ver os logs em tempo real, acesse o painel da sua aplicação na Vercel.</p>
       <a href="https://vercel.com/dashboard" target="_blank" rel="noopener noreferrer">Abrir Dashboard da Vercel</a>
+    </div>
+
+    <div class="card" id="chat-card">
+      <h2>Chat with Gemini</h2>
+      <style>
+        .chat-history { max-height: 400px; overflow-y: auto; border: 1px solid #eee; padding: 1em; margin-bottom: 1em; border-radius: 4px; }
+        .chat-history p { margin: 0 0 0.5em 0; padding: 0.5em; border-radius: 4px; }
+        .chat-history .user { background: #e1f5fe; text-align: right; }
+        .chat-history .model { background: #f1f8e9; }
+        .chat-form { display: flex; gap: 1em; }
+        .chat-form input[type=text] { flex-grow: 1; }
+        .clear-form { margin-top: 1em; }
+        .clear-form input { background: #e74c3c; }
+        .clear-form input:hover { background: #c0392b; }
+      </style>
+      <div class="chat-history">
+        {{ chat_content | safe }}
+      </div>
+      <form action="{{ url_for('admin_chat') }}" method="post" class="chat-form">
+        <input type="text" name="prompt" placeholder="Type your message..." required autocomplete="off">
+        <input type="submit" value="Send">
+      </form>
+      <form action="{{ url_for('clear_chat') }}" method="post" class="clear-form">
+        <input type="submit" value="Clear History">
+      </form>
     </div>
   </div>
 </body>
@@ -279,6 +304,55 @@ def send_message():
     asyncio.run(do_send())
     return redirect(url_for('admin_panel'))
 
+@app.route('/admin/chat', methods=['POST'])
+@login_required
+def admin_chat():
+    """Processa uma mensagem do chat do painel de admin."""
+    prompt = request.form.get('prompt')
+    if not prompt:
+        flash("A mensagem não pode estar vazia.", "error")
+        return redirect(url_for('admin_panel'))
+
+    # Obter histórico ou iniciar um novo
+    chat_history = session.get('chat_history', [])
+
+    try:
+        logger.info(f"Enviando prompt do chat admin para a API Gemini: '{prompt}'")
+        response = model.generate_content(prompt)
+        ai_response = response.text
+        logger.info("Resposta da API Gemini recebida para o chat admin.")
+
+        # Adicionar prompt e resposta ao histórico
+        chat_history.append({'role': 'user', 'text': prompt})
+        chat_history.append({'role': 'model', 'text': ai_response})
+        session['chat_history'] = chat_history
+
+    except Exception as e:
+        logger.error(f"Erro ao contatar a API Gemini no chat admin: {e}", exc_info=True)
+        flash(f"Erro ao processar sua mensagem: {e}", "error")
+
+    return redirect(url_for('admin_panel'))
+
+@app.route('/admin/clear_chat', methods=['POST'])
+@login_required
+def clear_chat():
+    """Limpa o histórico de chat da sessão."""
+    session.pop('chat_history', None)
+    flash("Histórico do chat foi limpo.", "success")
+    return redirect(url_for('admin_panel'))
+
+def format_chat_html(history):
+    """Formata o histórico do chat em HTML."""
+    if not history:
+        return "<p>Nenhuma mensagem ainda. Envie uma para começar!</p>"
+
+    html_output = ""
+    for message in history:
+        role = message.get('role', 'unknown')
+        text = html.escape(message.get('text', ''))
+        html_output += f'<p class="{role}"><strong>{role.title()}:</strong><br>{text.replace(chr(10), "<br>")}</p>'
+    return html_output
+
 @app.route('/admin')
 @login_required
 def admin_panel():
@@ -290,10 +364,15 @@ def admin_panel():
     # Formulário de envio de mensagem
     send_message_form = SEND_MESSAGE_FORM_TEMPLATE
 
+    # Obter e formatar o histórico do chat
+    chat_history = session.get('chat_history', [])
+    chat_content = format_chat_html(chat_history)
+
     return render_template_string(
         ADMIN_PANEL_TEMPLATE,
         status_content=status_content,
-        send_message_form=send_message_form
+        send_message_form=send_message_form,
+        chat_content=chat_content
     )
 
 
