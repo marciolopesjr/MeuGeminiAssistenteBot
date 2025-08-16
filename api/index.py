@@ -221,12 +221,13 @@ async def check_api_status():
 
 def format_status_html(status):
     """Formata o dicionário de status em HTML."""
-    html = "<ul>"
+    html_output = "<ul>"
     for service, info in status.items():
         icon = "✅" if info['status'] == 'OK' else "❌"
-        html += f"<li><strong>{service.title()}:</strong> {icon} {info['status']} - <small>{html.escape(info['details'])}</small></li>"
-    html += "</ul>"
-    return html
+        # Corrigido: Usar o módulo 'html' importado e garantir que o detalhe é uma string.
+        html_output += f"<li><strong>{service.title()}:</strong> {icon} {info['status']} - <small>{html.escape(str(info['details']))}</small></li>"
+    html_output += "</ul>"
+    return html_output
 
 SEND_MESSAGE_FORM_TEMPLATE = """
 <style>
@@ -276,10 +277,11 @@ async def send_message():
 
 @app.route('/admin')
 @login_required
-def admin_panel():
+async def admin_panel():
     """Página principal do painel de administração."""
     # Verificar status das APIs
-    status_data = asyncio.run(check_api_status())
+    # Corrigido: Usar await em uma rota async para evitar conflitos de event loop.
+    status_data = await check_api_status()
     status_content = format_status_html(status_data)
 
     # Formulário de envio de mensagem
