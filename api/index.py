@@ -281,11 +281,10 @@ def send_message():
 
 @app.route('/admin')
 @login_required
-async def admin_panel():
+def admin_panel():
     """Página principal do painel de administração."""
-    # Verificar status das APIs
-    # Corrigido: Usar await em uma rota async para evitar conflitos de event loop.
-    status_data = await check_api_status()
+    # Rota síncrona que executa uma função assíncrona de forma segura.
+    status_data = asyncio.run(check_api_status())
     status_content = format_status_html(status_data)
 
     # Formulário de envio de mensagem
