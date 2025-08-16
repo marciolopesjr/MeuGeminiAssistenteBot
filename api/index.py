@@ -6,6 +6,7 @@ import json
 import traceback
 import io
 import time
+import sys
 
 from flask import Flask, request, render_template_string, session, redirect, url_for, flash, jsonify
 import functools
@@ -20,11 +21,34 @@ import pymupdf  # fitz
 # Carregar variáveis de ambiente do arquivo.env (para desenvolvimento local)
 load_dotenv()
 
-# --- Configuração ---
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# --- Configuração do Logging ---
+# Remove o handler padrão para evitar duplicação de logs.
+root_logger = logging.getLogger()
+if root_logger.handlers:
+    for handler in root_logger.handlers:
+        root_logger.removeHandler(handler)
+
+# Formato do log
+log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+root_logger.setLevel(logging.INFO) # Define o nível mínimo para o logger raiz
+
+# Handler para stdout (INFO e DEBUG)
+class InfoFilter(logging.Filter):
+    def filter(self, record):
+        return record.levelno <= logging.INFO
+
+stdout_handler = logging.StreamHandler(sys.stdout)
+stdout_handler.setLevel(logging.DEBUG) # Captura a partir de DEBUG
+stdout_handler.addFilter(InfoFilter())
+stdout_handler.setFormatter(log_formatter)
+root_logger.addHandler(stdout_handler)
+
+# Handler para stderr (WARNING, ERROR, CRITICAL)
+stderr_handler = logging.StreamHandler(sys.stderr)
+stderr_handler.setLevel(logging.WARNING) # Captura a partir de WARNING
+stderr_handler.setFormatter(log_formatter)
+root_logger.addHandler(stderr_handler)
+
 logger = logging.getLogger(__name__)
 
 # Credenciais e IDs
