@@ -192,21 +192,20 @@ async def check_api_status():
         'telegram': {'status': 'Falha', 'details': 'Não foi possível verificar.'},
         'gemini': {'status': 'Falha', 'details': 'Não foi possível verificar.'}
     }
-    # Verificar Telegram
+    # Verificar Telegram com uma instância de bot temporária para evitar conflitos de loop
     try:
-        bot_info = await application.bot.get_me()
+        temp_bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
+        async with temp_bot:
+            bot_info = await temp_bot.get_me()
         status['telegram']['status'] = 'OK'
         status['telegram']['details'] = f"Conectado como @{bot_info.username} (ID: {bot_info.id})"
         logger.info("Verificação de status do Telegram: OK")
     except Exception as e:
-        logger.error(f"Falha na verificação da API do Telegram: {e}")
+        logger.error(f"Falha na verificação da API do Telegram: {e}", exc_info=True)
         status['telegram']['details'] = str(e)
 
     # Verificar Gemini
     try:
-        # A inicialização do modelo já é uma boa verificação.
-        # Para uma verificação mais explícita, poderíamos listar modelos, mas isso adiciona latência.
-        # Vamos assumir que se o 'model' existe, a configuração inicial foi bem-sucedida.
         if model:
             status['gemini']['status'] = 'OK'
             status['gemini']['details'] = f"Modelo '{model.model_name}' carregado com sucesso."
@@ -214,7 +213,7 @@ async def check_api_status():
         else:
             status['gemini']['details'] = "O objeto do modelo não foi inicializado."
     except Exception as e:
-        logger.error(f"Falha na verificação da API Gemini: {e}")
+        logger.error(f"Falha na verificação da API Gemini: {e}", exc_info=True)
         status['gemini']['details'] = str(e)
 
     return status
@@ -255,7 +254,7 @@ SEND_MESSAGE_FORM_TEMPLATE = """
 
 @app.route('/admin/send', methods=['POST'])
 @login_required
-async def send_message():
+def send_message():
     """Envia uma mensagem para um chat_id específico."""
     chat_id = request.form.get('chat_id')
     message = request.form.get('message')
@@ -264,15 +263,20 @@ async def send_message():
         flash("Chat ID e Mensagem são obrigatórios.", "error")
         return redirect(url_for('admin_panel'))
 
-    try:
-        logger.info(f"Enviando mensagem via painel admin para o chat {chat_id}...")
-        await application.bot.send_message(chat_id=chat_id, text=message)
-        flash(f"Mensagem enviada com sucesso para o Chat ID {chat_id}.", "success")
-        logger.info("Mensagem enviada com sucesso.")
-    except Exception as e:
-        logger.error(f"Falha ao enviar mensagem via painel admin: {e}", exc_info=True)
-        flash(f"Falha ao enviar mensagem: {e}", "error")
+    async def do_send():
+        """Helper assíncrono para enviar a mensagem com uma instância de bot temporária."""
+        try:
+            logger.info(f"Enviando mensagem via painel admin para o chat {chat_id}...")
+            temp_bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
+            async with temp_bot:
+                await temp_bot.send_message(chat_id=chat_id, text=message)
+            flash(f"Mensagem enviada com sucesso para o Chat ID {chat_id}.", "success")
+            logger.info("Mensagem enviada com sucesso.")
+        except Exception as e:
+            logger.error(f"Falha ao enviar mensagem via painel admin: {e}", exc_info=True)
+            flash(f"Falha ao enviar mensagem: {e}", "error")
 
+    asyncio.run(do_send())
     return redirect(url_for('admin_panel'))
 
 @app.route('/admin')
