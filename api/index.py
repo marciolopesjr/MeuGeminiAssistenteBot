@@ -42,7 +42,7 @@ if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
 # --- Inicialização dos Serviços ---
 # API Gemini
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 # Aplicação python-telegram-bot
 application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
