@@ -12,6 +12,7 @@ import functools
 from dotenv import load_dotenv
 import telegram
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from vercel_edge_config import EdgeConfigClient, get_edge_config_client
 import google.generativeai as genai
 import PIL.Image
 import pymupdf  # fitz
@@ -40,10 +41,46 @@ ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD')
 if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
     raise ValueError("As variáveis de ambiente TELEGRAM_BOT_TOKEN e GEMINI_API_KEY são obrigatórias.")
 
+# --- Config Management ---
+
+DEFAULT_SAFETY_SETTINGS = {
+    "HARM_CATEGORY_HARASSMENT": "BLOCK_MEDIUM_AND_ABOVE",
+    "HARM_CATEGORY_HATE_SPEECH": "BLOCK_MEDIUM_AND_ABOVE",
+    "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_MEDIUM_AND_ABOVE",
+    "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_MEDIUM_AND_ABOVE",
+}
+
+def get_all_configs():
+    """Busca todas as configurações do Vercel Edge Config."""
+    try:
+        client = get_edge_config_client()
+        configs = client.get_all(['system_instruction', 'safety_settings'])
+        # Fornecer padrões se não estiverem definidos
+        configs.setdefault('system_instruction', "You are a helpful assistant.")
+        configs.setdefault('safety_settings', DEFAULT_SAFETY_SETTINGS)
+        return configs
+    except Exception as e:
+        logger.error(f"Could not fetch from Edge Config, falling back to defaults: {e}")
+        return {
+            'system_instruction': "You are a helpful assistant.",
+            'safety_settings': DEFAULT_SAFETY_SETTINGS
+        }
+
+def save_config_item(key, value):
+    """Salva um item de configuração no Vercel Edge Config."""
+    try:
+        client = get_edge_config_client()
+        client.set(key, value)
+        logger.info(f"Config item '{key}' saved to Edge Config.")
+        return True
+    except Exception as e:
+        logger.error(f"Could not save to Edge Config: {e}", exc_info=True)
+        return False
+
 # --- Inicialização dos Serviços ---
 # API Gemini
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+# O modelo agora é instanciado sob demanda com a configuração mais recente
 
 # Aplicação python-telegram-bot
 application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -64,35 +101,33 @@ LOGIN_TEMPLATE = """
 <head>
   <title>Login - Bot Admin</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: #f4f7f6; color: #333; line-height: 1.6; }
-    .container { max-width: 400px; margin: 5em auto; padding: 2em; background: white; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
-    h1 { text-align: center; color: #1a1a1a; }
-    label { display: block; margin-bottom: .5em; font-weight: bold; }
-    input[type=text], input[type=password] { width: 100%; padding: .8em; margin-bottom: 1em; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
-    input[type=submit] { width: 100%; padding: .8em; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; }
-    input[type=submit]:hover { background: #0056b3; }
-    .flash { padding: 1em; margin-bottom: 1em; border-radius: 4px; text-align: center; }
-    .flash.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
-    .flash.info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
-  </style>
+  <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body>
-  <div class="container">
-    <h1>Admin Login</h1>
+<body class="bg-slate-100 text-slate-800">
+  <div class="container mx-auto max-w-sm mt-20 p-8 bg-white rounded-lg shadow-lg">
+    <h1 class="text-2xl font-bold text-center mb-6">Admin Login</h1>
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
         {% for category, message in messages %}
-          <div class="flash {{ category }}">{{ message }}</div>
+          {% set color = 'bg-red-100 border-red-400 text-red-700' if category == 'error' else 'bg-blue-100 border-blue-400 text-blue-700' %}
+          <div class="p-4 mb-4 text-sm rounded-lg border {{ color }}" role="alert">
+            {{ message }}
+          </div>
         {% endfor %}
       {% endif %}
     {% endwith %}
     <form method=post>
-      <label for=username>Username</label>
-      <input type=text id=username name=username required>
-      <label for=password>Password</label>
-      <input type=password id=password name=password required>
-      <input type=submit value=Login>
+      <div class="mb-4">
+        <label for="username" class="block text-slate-700 text-sm font-bold mb-2">Username</label>
+        <input type="text" id="username" name="username" required class="shadow appearance-none border rounded w-full py-2 px-3 text-slate-700 leading-tight focus:outline-none focus:shadow-outline">
+      </div>
+      <div class="mb-6">
+        <label for="password" class="block text-slate-700 text-sm font-bold mb-2">Password</label>
+        <input type="password" id="password" name="password" required class="shadow appearance-none border rounded w-full py-2 px-3 text-slate-700 leading-tight focus:outline-none focus:shadow-outline">
+      </div>
+      <div>
+        <input type="submit" value="Login" class="w-full bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline cursor-pointer">
+      </div>
     </form>
   </div>
 </body>
@@ -105,120 +140,113 @@ ADMIN_PANEL_TEMPLATE = """
 <head>
   <title>Bot Admin Panel</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: #f4f7f6; color: #333; margin: 0; }
-    .header { background: #2c3e50; color: white; padding: 1em; display: flex; justify-content: space-between; align-items: center; }
-    .header h1 { margin: 0; font-size: 1.5em; }
-    .header a { color: #ecf0f1; text-decoration: none; }
-    .header a:hover { text-decoration: underline; }
-    .container { padding: 2em; max-width: 900px; margin: 0 auto; }
-    .card { background: white; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); margin-bottom: 2em; padding: 1.5em; }
-    h2 { margin-top: 0; border-bottom: 2px solid #ecf0f1; padding-bottom: 0.5em; color: #2c3e50; }
-    .flash { padding: 1em; margin-bottom: 1em; border-radius: 4px; text-align: center; }
-    .flash.error { background: #e74c3c; color: white; }
-    .flash.success { background: #2ecc71; color: white; }
-    .flash.info { background: #3498db; color: white; }
-  </style>
+  <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body>
-  <div class="header">
-    <h1>Bot Admin Panel</h1>
-    <a href="{{ url_for('logout') }}">Logout</a>
-  </div>
-  <div class="container">
+<body class="bg-slate-100 text-slate-800">
+  <header class="bg-slate-800 text-white shadow-md">
+    <div class="container mx-auto px-6 py-4 flex justify-between items-center">
+      <h1 class="text-xl font-semibold">Bot Admin Panel</h1>
+      <a href="{{ url_for('logout') }}" class="text-sm hover:text-slate-300">Logout</a>
+    </div>
+  </header>
+
+  <main class="container mx-auto px-6 py-8">
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
         {% for category, message in messages %}
-          <div class="flash {{ category }}">{{ message }}</div>
+          {% set colors = {
+            'error': 'bg-red-100 border-red-500 text-red-700',
+            'success': 'bg-green-100 border-green-500 text-green-700',
+            'info': 'bg-blue-100 border-blue-500 text-blue-700'
+          } %}
+          <div class="p-4 mb-6 text-sm rounded-lg border {{ colors[category] or colors['info'] }}" role="alert">
+            {{ message }}
+          </div>
         {% endfor %}
       {% endif %}
     {% endwith %}
 
-    <div class="card" id="status-card">
-      <h2>System Status</h2>
-      {{ status_content | safe }}
-    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
 
-    <div class="card" id="send-message-card">
-      <h2>Send Message to User</h2>
-      {{ send_message_form | safe }}
-    </div>
+      <!-- Coluna da Esquerda -->
+      <div class="flex flex-col gap-8">
+        <div class="bg-white p-6 rounded-lg shadow-lg">
+          <h2 class="text-xl font-bold mb-4 border-b pb-2">System Status</h2>
+          <div class="text-sm">{{ status_content | safe }}</div>
+        </div>
 
-    <div class="card" id="logs-card">
-      <h2>View Logs</h2>
-      <p>A aplicação está rodando em um ambiente serverless. Os logs detalhados não podem ser exibidos aqui diretamente.</p>
-      <p>Para ver os logs em tempo real, acesse o painel da sua aplicação na Vercel.</p>
-      <a href="https://vercel.com/dashboard" target="_blank" rel="noopener noreferrer">Abrir Dashboard da Vercel</a>
-    </div>
+        <div class="bg-white p-6 rounded-lg shadow-lg">
+            <h2 class="text-xl font-bold mb-4 border-b pb-2">Webhook Tools</h2>
+            <div class="flex items-center gap-4">
+                <button id="check-webhook-btn" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">Check Status</button>
+                <form action="{{ url_for('set_webhook') }}" method="post">
+                    <input type="submit" value="Set Automatically" class="bg-amber-500 hover:bg-amber-600 text-white font-bold py-2 px-4 rounded cursor-pointer">
+                </form>
+            </div>
+            <pre id="webhook-info-pre" class="mt-4 bg-slate-50 p-4 rounded-md text-xs text-slate-600 whitespace-pre-wrap word-wrap break-word">Click 'Check Status' to fetch webhook info...</pre>
+        </div>
 
-    <div class="card" id="chat-card">
-      <h2>Chat with Gemini</h2>
-      <style>
-        .chat-history { max-height: 400px; overflow-y: auto; border: 1px solid #eee; padding: 1em; margin-bottom: 1em; border-radius: 4px; }
-        .chat-history p { margin: 0 0 0.5em 0; padding: 0.5em; border-radius: 4px; }
-        .chat-history .user { background: #e1f5fe; text-align: right; }
-        .chat-history .model { background: #f1f8e9; }
-        .chat-form { display: flex; gap: 1em; }
-        .chat-form input[type=text] { flex-grow: 1; }
-        .clear-form { margin-top: 1em; }
-        .clear-form input { background: #e74c3c; }
-        .clear-form input:hover { background: #c0392b; }
-      </style>
-      <div class="chat-history">
-        {{ chat_content | safe }}
+        <div class="bg-white p-6 rounded-lg shadow-lg">
+          <h2 class="text-xl font-bold mb-4 border-b pb-2">Message Simulator (Text Only)</h2>
+          {{ send_message_form | safe }}
+        </div>
+
+        <!-- AI Settings Card -->
+        <div class="bg-white p-6 rounded-lg shadow-lg">
+            <h2 class="text-xl font-bold mb-4 border-b pb-2">AI Configuration</h2>
+            <form action="{{ url_for('save_settings') }}" method="post">
+                <div class="mb-4">
+                    <label for="system_instruction" class="block text-slate-700 text-sm font-bold mb-2">System Instruction:</label>
+                    <textarea id="system_instruction" name="system_instruction" class="shadow-sm appearance-none border rounded w-full py-2 px-3 text-slate-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" rows="4">{{ configs.system_instruction }}</textarea>
+                </div>
+                <div class="mb-4">
+                    <h3 class="block text-slate-700 text-sm font-bold mb-2">Safety Filters</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {% for category, level in configs.safety_settings.items() %}
+                        <div>
+                            <label for="{{ category }}" class="text-xs font-semibold text-slate-600">{{ category.replace('HARM_CATEGORY_', '').replace('_', ' ')|title }}</label>
+                            <select name="{{ category }}" id="{{ category }}" class="mt-1 shadow-sm border rounded w-full py-2 px-3 text-slate-700">
+                                {% for option in ['BLOCK_NONE', 'BLOCK_LOW_AND_ABOVE', 'BLOCK_MEDIUM_AND_ABOVE', 'BLOCK_ONLY_HIGH'] %}
+                                <option value="{{ option }}" {% if option == level %}selected{% endif %}>{{ option.replace('BLOCK_', '').replace('_', ' ')|title }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                <input type="submit" value="Save AI Settings" class="w-full bg-emerald-500 hover:bg-emerald-700 text-white font-bold py-2 px-4 rounded cursor-pointer">
+            </form>
+        </div>
       </div>
-      <form action="{{ url_for('admin_chat') }}" method="post" class="chat-form">
-        <input type="text" name="prompt" placeholder="Type your message..." required autocomplete="off">
-        <input type="submit" value="Send">
-      </form>
-      <form action="{{ url_for('clear_chat') }}" method="post" class="clear-form">
-        <input type="submit" value="Clear History">
-      </form>
-    </div>
 
-    <div class="card" id="webhook-card">
-        <h2>Webhook Status</h2>
-        <button id="check-webhook-btn">Check Webhook Status Now</button>
-        <form action="{{ url_for('set_webhook') }}" method="post" style="display: inline-block; margin-left: 1em;">
-            <input type="submit" value="Set Webhook Automatically" style="background: #f39c12; border-color: #f39c12;">
+      <!-- Coluna da Direita -->
+      <div class="bg-white p-6 rounded-lg shadow-lg">
+        <h2 class="text-xl font-bold mb-4 border-b pb-2">Chat with Gemini</h2>
+        <div id="chat-history" class="h-96 overflow-y-auto border bg-slate-50 rounded-md p-4 mb-4 text-sm space-y-4">
+          {{ chat_content | safe }}
+        </div>
+        <form action="{{ url_for('admin_chat') }}" method="post" class="flex gap-2">
+          <input type="text" name="prompt" placeholder="Type your message..." required autocomplete="off" class="flex-grow shadow-sm appearance-none border rounded w-full py-2 px-3 text-slate-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <input type="submit" value="Send" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded cursor-pointer">
         </form>
-        <pre id="webhook-info-pre" style="background: #eef; padding: 1em; border-radius: 4px; white-space: pre-wrap; word-wrap: break-word; margin-top: 1em;">Click the button to fetch webhook info...</pre>
-    </div>
+        <form action="{{ url_for('clear_chat') }}" method="post" class="mt-2">
+          <input type="submit" value="Clear History" class="text-xs text-red-500 hover:text-red-700 underline cursor-pointer bg-transparent border-none p-0">
+        </form>
+      </div>
 
-    <div class="card" id="simulator-card">
-        <h2>Message Simulator (Text Only)</h2>
-        <form action="{{ url_for('simulate_message') }}" method="post">
-            <input type="hidden" name="message_type" value="text">
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1em;">
-                <div>
-                    <label for="sim_chat_id">Chat ID:</label>
-                    <input type="text" id="sim_chat_id" name="chat_id" value="{{ developer_chat_id or '' }}" required>
-                </div>
-                <div>
-                    <label for="sim_user_id">User ID:</label>
-                    <input type="text" id="sim_user_id" name="user_id" value="{{ developer_chat_id or '' }}" required>
-                </div>
-            </div>
-            <div>
-                <label for="sim_username">Username:</label>
-                <input type="text" id="sim_username" name="username" value="AdminSimulator">
-            </div>
-            <div>
-                <label for="sim_text">Message Text:</label>
-                <textarea id="sim_text" name="text" required style="width:100%; min-height: 60px; box-sizing: border-box;">Hello from the simulator!</textarea>
-            </div>
-            <div style="margin-top: 1em;">
-                <input type="submit" value="Simulate Text Message">
-            </div>
-        </form>
     </div>
-  </div>
+  </main>
   <script>
     document.getElementById('check-webhook-btn').addEventListener('click', function() {
         const pre = document.getElementById('webhook-info-pre');
         pre.textContent = 'Fetching...';
         fetch('{{ url_for("get_webhook_info") }}')
-            .then(response => response.json())
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
             .then(data => {
                 pre.textContent = JSON.stringify(data, null, 2);
             })
@@ -226,6 +254,8 @@ ADMIN_PANEL_TEMPLATE = """
                 pre.textContent = 'Error fetching webhook info: ' + error;
             });
     });
+    const chatHistory = document.getElementById('chat-history');
+    chatHistory.scrollTop = chatHistory.scrollHeight;
   </script>
 </body>
 </html>
@@ -412,26 +442,16 @@ def format_status_html(status):
     return html_output
 
 SEND_MESSAGE_FORM_TEMPLATE = """
-<style>
-    form {{ display: flex; flex-direction: column; }}
-    form label {{ margin-bottom: .5em; font-weight: 500; }}
-    form input[type=text], form textarea {{
-        width: 100%; padding: .8em; margin-bottom: 1em; border: 1px solid #ddd;
-        border-radius: 4px; box-sizing: border-box; font-family: inherit;
-    }}
-    form textarea {{ resize: vertical; min-height: 80px; }}
-    form input[type=submit] {{
-        width: auto; padding: .8em 1.5em; background: #2ecc71; color: white; border: none;
-        border-radius: 4px; cursor: pointer; font-size: 1em; align-self: flex-start;
-    }}
-    form input[type=submit]:hover {{ background: #27ae60; }}
-</style>
 <form action="{{ url_for('send_message') }}" method="post">
-    <label for="chat_id">Chat ID:</label>
-    <input type="text" id="chat_id" name="chat_id" required>
-    <label for="message">Message:</label>
-    <textarea id="message" name="message" required></textarea>
-    <input type="submit" value="Send Message">
+    <div class="mb-4">
+        <label for="chat_id" class="block text-slate-700 text-sm font-bold mb-2">Chat ID:</label>
+        <input type="text" id="chat_id" name="chat_id" required class="shadow-sm appearance-none border rounded w-full py-2 px-3 text-slate-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500">
+    </div>
+    <div class="mb-4">
+        <label for="message" class="block text-slate-700 text-sm font-bold mb-2">Message:</label>
+        <textarea id="message" name="message" required class="shadow-sm appearance-none border rounded w-full py-2 px-3 text-slate-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" rows="3"></textarea>
+    </div>
+    <input type="submit" value="Send Message" class="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded cursor-pointer">
 </form>
 """
 
@@ -462,6 +482,29 @@ def send_message():
     asyncio.run(do_send())
     return redirect(url_for('admin_panel'))
 
+@app.route('/admin/save_settings', methods=['POST'])
+@login_required
+def save_settings():
+    """Salva as configurações da IA no Edge Config."""
+    try:
+        # Salvar a instrução de sistema
+        system_instruction = request.form.get('system_instruction')
+        save_config_item('system_instruction', system_instruction)
+
+        # Montar e salvar as configurações de segurança
+        safety_settings = {}
+        for key, value in request.form.items():
+            if key.startswith('HARM_CATEGORY_'):
+                safety_settings[key] = value
+        save_config_item('safety_settings', safety_settings)
+
+        flash("Configurações da IA salvas com sucesso!", "success")
+    except Exception as e:
+        logger.error(f"Erro ao salvar configurações: {e}", exc_info=True)
+        flash(f"Ocorreu um erro ao salvar as configurações: {e}", "error")
+
+    return redirect(url_for('admin_panel'))
+
 @app.route('/admin/chat', methods=['POST'])
 @login_required
 def admin_chat():
@@ -471,16 +514,23 @@ def admin_chat():
         flash("A mensagem não pode estar vazia.", "error")
         return redirect(url_for('admin_panel'))
 
-    # Obter histórico ou iniciar um novo
     chat_history = session.get('chat_history', [])
 
     try:
+        configs = get_all_configs()
+        # O chat do admin também deve usar as configurações
+        # TODO: Adicionar lógica de contexto máximo aqui no futuro
+        model = genai.GenerativeModel(
+            'gemini-1.5-flash',
+            system_instruction=configs.get('system_instruction'),
+            safety_settings=configs.get('safety_settings')
+        )
+
         logger.info(f"Enviando prompt do chat admin para a API Gemini: '{prompt}'")
         response = model.generate_content(prompt)
         ai_response = response.text
         logger.info("Resposta da API Gemini recebida para o chat admin.")
 
-        # Adicionar prompt e resposta ao histórico
         chat_history.append({'role': 'user', 'text': prompt})
         chat_history.append({'role': 'model', 'text': ai_response})
         session['chat_history'] = chat_history
@@ -526,12 +576,16 @@ def admin_panel():
     chat_history = session.get('chat_history', [])
     chat_content = format_chat_html(chat_history)
 
+    # Obter configurações atuais para preencher o formulário de configurações
+    current_configs = get_all_configs()
+
     return render_template_string(
         ADMIN_PANEL_TEMPLATE,
         status_content=status_content,
         send_message_form=send_message_form,
         chat_content=chat_content,
-        developer_chat_id=DEVELOPER_CHAT_ID
+        developer_chat_id=DEVELOPER_CHAT_ID,
+        configs=current_configs
     )
 
 
@@ -575,6 +629,12 @@ async def handle_text(update: telegram.Update, context: ContextTypes.DEFAULT_TYP
     logger.info(f"Handler 'text' ativado para o chat {chat_id}: '{text}'")
 
     try:
+        configs = get_all_configs()
+        model = genai.GenerativeModel(
+            'gemini-1.5-flash',
+            system_instruction=configs.get('system_instruction'),
+            safety_settings=configs.get('safety_settings')
+        )
         logger.info("Enviando prompt de texto para a API Gemini...")
         response = model.generate_content(text)
         logger.info("Resposta da API Gemini recebida.")
@@ -599,6 +659,12 @@ async def handle_photo(update: telegram.Update, context: ContextTypes.DEFAULT_TY
         img = PIL.Image.open(f)
         prompt_text = "Descreva esta imagem em detalhes. O que você vê?"
 
+        configs = get_all_configs()
+        model = genai.GenerativeModel(
+            'gemini-1.5-flash',
+            system_instruction=configs.get('system_instruction'),
+            safety_settings=configs.get('safety_settings')
+        )
         logger.info("Enviando imagem para a API Gemini...")
         response = model.generate_content([prompt_text, img])
         logger.info("Resposta da API Gemini recebida.")
@@ -632,7 +698,6 @@ async def handle_media(update: telegram.Update, context: ContextTypes.DEFAULT_TY
 
         await send_safe_message(chat_id=chat_id, text=processing_message)
 
-        # O get_file precisa usar o bot do contexto, pois está relacionado ao update.
         tg_file = await context.bot.get_file(file_id)
         file_path = f"/tmp/{file_id}.{file_extension}"
         logger.info(f"Baixando arquivo para {file_path}...")
@@ -643,6 +708,12 @@ async def handle_media(update: telegram.Update, context: ContextTypes.DEFAULT_TY
         gemini_file = genai.upload_file(path=file_path)
         logger.info(f"Upload para a API Gemini concluído. File name: {gemini_file.name}")
 
+        configs = get_all_configs()
+        model = genai.GenerativeModel(
+            'gemini-1.5-flash',
+            system_instruction=configs.get('system_instruction'),
+            safety_settings=configs.get('safety_settings')
+        )
         logger.info(f"Enviando prompt de {media_type} para a API Gemini...")
         response = model.generate_content([prompt, gemini_file])
         logger.info(f"Resposta da API Gemini recebida.")
@@ -676,7 +747,6 @@ async def handle_document(update: telegram.Update, context: ContextTypes.DEFAULT
         await send_safe_message(chat_id=chat_id, text=f"Analisando o PDF '{document.file_name}'...")
 
         logger.info("Baixando arquivo PDF para a memória...")
-        # O get_file precisa usar o bot do contexto.
         doc_file = await context.bot.get_file(document.file_id)
         pdf_bytes = io.BytesIO()
         await doc_file.download_to_memory(pdf_bytes)
@@ -693,8 +763,14 @@ async def handle_document(update: telegram.Update, context: ContextTypes.DEFAULT
             await send_safe_message(chat_id=chat_id, text="O PDF parece não conter texto extraível.")
             return
 
-        prompt = f"Resuma o seguinte texto extraído de um documento PDF. Identifique os pontos principais e conclusões:\n\n{extracted_text[:10000]}" # Limita o tamanho do prompt
+        prompt = f"Resuma o seguinte texto extraído de um documento PDF. Identifique os pontos principais e conclusões:\n\n{extracted_text[:10000]}"
 
+        configs = get_all_configs()
+        model = genai.GenerativeModel(
+            'gemini-1.5-flash',
+            system_instruction=configs.get('system_instruction'),
+            safety_settings=configs.get('safety_settings')
+        )
         logger.info("Enviando texto extraído do PDF para a API Gemini...")
         response = model.generate_content(prompt)
         logger.info("Resposta da API Gemini recebida.")
@@ -702,7 +778,6 @@ async def handle_document(update: telegram.Update, context: ContextTypes.DEFAULT
         response_text = f"Resumo do PDF '{document.file_name}':\n\n{response.text}"
 
         logger.info(f"Enviando resumo do PDF para o chat {chat_id}.")
-        # Telegram tem um limite de 4096 caracteres por mensagem
         for i in range(0, len(response_text), 4096):
             await send_safe_message(chat_id=chat_id, text=response_text[i:i+4096])
         logger.info("Resumo do PDF enviado com sucesso.")
