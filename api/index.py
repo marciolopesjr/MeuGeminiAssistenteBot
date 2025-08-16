@@ -667,7 +667,7 @@ async def start(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
         "Olá! Eu sou seu assistente multimodal com a tecnologia Gemini.\n\n"
         "Posso fazer o seguinte:\n"
         "- Conversar com você em texto.\n"
-        "- Descrever imagens que você me enviar.\n"
+        "- Analisar imagens: Envie uma imagem com uma pergunta ou instrução na legenda. Se não houver legenda, eu a descreverei.\n"
         "- Transcrever mensagens de voz e arquivos de áudio.\n"
         "- Resumir vídeos.\n"
         "- Analisar e resumir documentos PDF.\n\n"
@@ -702,7 +702,16 @@ async def handle_photo(update: telegram.Update, context: ContextTypes.DEFAULT_TY
     logger.info(f"Handler 'photo' ativado para o chat {chat_id}.")
 
     try:
-        await send_safe_message(chat_id=chat_id, text="Analisando a imagem...")
+        # Define o prompt com base na legenda da imagem
+        if update.message.caption:
+            prompt_text = update.message.caption
+            logger.info(f"Legenda da imagem recebida como prompt: '{prompt_text}'")
+            await send_safe_message(chat_id=chat_id, text=f"Analisando a imagem com a sua instrução: \"{prompt_text}\"")
+        else:
+            prompt_text = "Descreva esta imagem em detalhes. O que você vê?"
+            logger.info("Nenhuma legenda na imagem. Usando prompt padrão.")
+            await send_safe_message(chat_id=chat_id, text="Analisando a imagem...")
+
         photo_file = await context.bot.get_file(update.message.photo[-1].file_id)
 
         f = io.BytesIO()
@@ -710,7 +719,6 @@ async def handle_photo(update: telegram.Update, context: ContextTypes.DEFAULT_TY
         f.seek(0)
 
         img = PIL.Image.open(f)
-        prompt_text = "Descreva esta imagem em detalhes. O que você vê?"
 
         configs = get_all_configs()
         model = genai.GenerativeModel(
@@ -718,7 +726,7 @@ async def handle_photo(update: telegram.Update, context: ContextTypes.DEFAULT_TY
             system_instruction=configs.get('system_instruction'),
             safety_settings=configs.get('safety_settings')
         )
-        logger.info("Enviando imagem para a API Gemini...")
+        logger.info(f"Enviando imagem e prompt para a API Gemini...")
         response = model.generate_content([prompt_text, img])
         logger.info("Resposta da API Gemini recebida.")
 
