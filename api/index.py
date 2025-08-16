@@ -6,7 +6,8 @@ import json
 import traceback
 import io
 
-from flask import Flask, request
+from flask import Flask, request, render_template_string, session, redirect, url_for, flash
+import functools
 from dotenv import load_dotenv
 import telegram
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -27,10 +28,16 @@ logger = logging.getLogger(__name__)
 # Credenciais e IDs
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-DEVELOPER_CHAT_ID = os.environ.get('DEVELOPER_CHAT_ID') # Defina seu ID de chat como variável de ambiente
+DEVELOPER_CHAT_ID = os.environ.get('DEVELOPER_CHAT_ID')
 
-if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY or not DEVELOPER_CHAT_ID:
-    raise ValueError("Variáveis de ambiente TELEGRAM_BOT_TOKEN, GEMINI_API_KEY e DEVELOPER_CHAT_ID são obrigatórias.")
+# Credenciais da Interface Web de Admin
+FLASK_SECRET_KEY = os.environ.get('FLASK_SECRET_KEY')
+ADMIN_USER = os.environ.get('ADMIN_USER')
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD')
+
+
+if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
+    raise ValueError("As variáveis de ambiente TELEGRAM_BOT_TOKEN e GEMINI_API_KEY são obrigatórias.")
 
 # --- Inicialização dos Serviços ---
 # API Gemini
@@ -42,6 +49,247 @@ application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
 # Aplicação Flask
 app = Flask(__name__)
+app.secret_key = FLASK_SECRET_KEY
+
+
+# --- Admin Web Interface ---
+
+LOGIN_TEMPLATE = """
+<!doctype html>
+<html>
+<head>
+  <title>Login - Bot Admin</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: #f4f7f6; color: #333; line-height: 1.6; }
+    .container { max-width: 400px; margin: 5em auto; padding: 2em; background: white; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
+    h1 { text-align: center; color: #1a1a1a; }
+    label { display: block; margin-bottom: .5em; font-weight: bold; }
+    input[type=text], input[type=password] { width: 100%; padding: .8em; margin-bottom: 1em; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+    input[type=submit] { width: 100%; padding: .8em; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; }
+    input[type=submit]:hover { background: #0056b3; }
+    .flash { padding: 1em; margin-bottom: 1em; border-radius: 4px; text-align: center; }
+    .flash.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+    .flash.info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Admin Login</h1>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="flash {{ category }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+    <form method=post>
+      <label for=username>Username</label>
+      <input type=text id=username name=username required>
+      <label for=password>Password</label>
+      <input type=password id=password name=password required>
+      <input type=submit value=Login>
+    </form>
+  </div>
+</body>
+</html>
+"""
+
+ADMIN_PANEL_TEMPLATE = """
+<!doctype html>
+<html>
+<head>
+  <title>Bot Admin Panel</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: #f4f7f6; color: #333; margin: 0; }
+    .header { background: #2c3e50; color: white; padding: 1em; display: flex; justify-content: space-between; align-items: center; }
+    .header h1 { margin: 0; font-size: 1.5em; }
+    .header a { color: #ecf0f1; text-decoration: none; }
+    .header a:hover { text-decoration: underline; }
+    .container { padding: 2em; max-width: 900px; margin: 0 auto; }
+    .card { background: white; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); margin-bottom: 2em; padding: 1.5em; }
+    h2 { margin-top: 0; border-bottom: 2px solid #ecf0f1; padding-bottom: 0.5em; color: #2c3e50; }
+    .flash { padding: 1em; margin-bottom: 1em; border-radius: 4px; text-align: center; }
+    .flash.error { background: #e74c3c; color: white; }
+    .flash.success { background: #2ecc71; color: white; }
+    .flash.info { background: #3498db; color: white; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Bot Admin Panel</h1>
+    <a href="{{ url_for('logout') }}">Logout</a>
+  </div>
+  <div class="container">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="flash {{ category }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <div class="card" id="status-card">
+      <h2>System Status</h2>
+      {{ status_content | safe }}
+    </div>
+
+    <div class="card" id="send-message-card">
+      <h2>Send Message to User</h2>
+      {{ send_message_form | safe }}
+    </div>
+
+    <div class="card" id="logs-card">
+      <h2>View Logs</h2>
+      <p>A aplicação está rodando em um ambiente serverless. Os logs detalhados não podem ser exibidos aqui diretamente.</p>
+      <p>Para ver os logs em tempo real, acesse o painel da sua aplicação na Vercel.</p>
+      <a href="https://vercel.com/dashboard" target="_blank" rel="noopener noreferrer">Abrir Dashboard da Vercel</a>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+def login_required(f):
+    @functools.wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'logged_in' not in session:
+            flash("Por favor, faça login para acessar esta página.", "info")
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Exibe o formulário de login e processa a autenticação."""
+    if not all([ADMIN_USER, ADMIN_PASSWORD, FLASK_SECRET_KEY]):
+        logger.error("As variáveis de ambiente do admin não estão configuradas.")
+        return "<h1>Erro de Configuração</h1><p>A interface de administração não foi configurada corretamente no servidor. Contate o administrador.</p>", 500
+
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        if username == ADMIN_USER and password == ADMIN_PASSWORD:
+            session['logged_in'] = True
+            flash("Login realizado com sucesso!", "success")
+            return redirect(url_for('admin_panel'))
+        else:
+            flash("Credenciais inválidas. Tente novamente.", "error")
+
+    return render_template_string(LOGIN_TEMPLATE)
+
+@app.route('/logout')
+def logout():
+    """Faz o logout do usuário."""
+    session.pop('logged_in', None)
+    flash("Você foi desconectado.", "info")
+    return redirect(url_for('login'))
+
+async def check_api_status():
+    """Verifica o status das conexões com as APIs do Telegram e Gemini."""
+    status = {
+        'telegram': {'status': 'Falha', 'details': 'Não foi possível verificar.'},
+        'gemini': {'status': 'Falha', 'details': 'Não foi possível verificar.'}
+    }
+    # Verificar Telegram
+    try:
+        bot_info = await application.bot.get_me()
+        status['telegram']['status'] = 'OK'
+        status['telegram']['details'] = f"Conectado como @{bot_info.username} (ID: {bot_info.id})"
+        logger.info("Verificação de status do Telegram: OK")
+    except Exception as e:
+        logger.error(f"Falha na verificação da API do Telegram: {e}")
+        status['telegram']['details'] = str(e)
+
+    # Verificar Gemini
+    try:
+        # A inicialização do modelo já é uma boa verificação.
+        # Para uma verificação mais explícita, poderíamos listar modelos, mas isso adiciona latência.
+        # Vamos assumir que se o 'model' existe, a configuração inicial foi bem-sucedida.
+        if model:
+            status['gemini']['status'] = 'OK'
+            status['gemini']['details'] = f"Modelo '{model.model_name}' carregado com sucesso."
+            logger.info("Verificação de status do Gemini: OK")
+        else:
+            status['gemini']['details'] = "O objeto do modelo não foi inicializado."
+    except Exception as e:
+        logger.error(f"Falha na verificação da API Gemini: {e}")
+        status['gemini']['details'] = str(e)
+
+    return status
+
+def format_status_html(status):
+    """Formata o dicionário de status em HTML."""
+    html = "<ul>"
+    for service, info in status.items():
+        icon = "✅" if info['status'] == 'OK' else "❌"
+        html += f"<li><strong>{service.title()}:</strong> {icon} {info['status']} - <small>{html.escape(info['details'])}</small></li>"
+    html += "</ul>"
+    return html
+
+SEND_MESSAGE_FORM_TEMPLATE = """
+<style>
+    form {{ display: flex; flex-direction: column; }}
+    form label {{ margin-bottom: .5em; font-weight: 500; }}
+    form input[type=text], form textarea {{
+        width: 100%; padding: .8em; margin-bottom: 1em; border: 1px solid #ddd;
+        border-radius: 4px; box-sizing: border-box; font-family: inherit;
+    }}
+    form textarea {{ resize: vertical; min-height: 80px; }}
+    form input[type=submit] {{
+        width: auto; padding: .8em 1.5em; background: #2ecc71; color: white; border: none;
+        border-radius: 4px; cursor: pointer; font-size: 1em; align-self: flex-start;
+    }}
+    form input[type=submit]:hover {{ background: #27ae60; }}
+</style>
+<form action="{{ url_for('send_message') }}" method="post">
+    <label for="chat_id">Chat ID:</label>
+    <input type="text" id="chat_id" name="chat_id" required>
+    <label for="message">Message:</label>
+    <textarea id="message" name="message" required></textarea>
+    <input type="submit" value="Send Message">
+</form>
+"""
+
+@app.route('/admin/send', methods=['POST'])
+@login_required
+async def send_message():
+    """Envia uma mensagem para um chat_id específico."""
+    chat_id = request.form.get('chat_id')
+    message = request.form.get('message')
+
+    if not chat_id or not message:
+        flash("Chat ID e Mensagem são obrigatórios.", "error")
+        return redirect(url_for('admin_panel'))
+
+    try:
+        logger.info(f"Enviando mensagem via painel admin para o chat {chat_id}...")
+        await application.bot.send_message(chat_id=chat_id, text=message)
+        flash(f"Mensagem enviada com sucesso para o Chat ID {chat_id}.", "success")
+        logger.info("Mensagem enviada com sucesso.")
+    except Exception as e:
+        logger.error(f"Falha ao enviar mensagem via painel admin: {e}", exc_info=True)
+        flash(f"Falha ao enviar mensagem: {e}", "error")
+
+    return redirect(url_for('admin_panel'))
+
+@app.route('/admin')
+@login_required
+def admin_panel():
+    """Página principal do painel de administração."""
+    # Verificar status das APIs
+    status_data = asyncio.run(check_api_status())
+    status_content = format_status_html(status_data)
+
+    # Formulário de envio de mensagem
+    send_message_form = SEND_MESSAGE_FORM_TEMPLATE
+
+    return render_template_string(
+        ADMIN_PANEL_TEMPLATE,
+        status_content=status_content,
+        send_message_form=send_message_form
+    )
 
 
 # --- Manipuladores de Mensagens (Handlers) ---
