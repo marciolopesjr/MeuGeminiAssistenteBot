@@ -4,4 +4,4 @@ Flask
 python-dotenv
 PyMuPDF
 Pillow
-vercel-edge-config
+requests

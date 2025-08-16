@@ -12,7 +12,7 @@ import functools
 from dotenv import load_dotenv
 import telegram
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from vercel_edge_config import EdgeConfigClient, get_edge_config_client
+import requests
 import google.generativeai as genai
 import PIL.Image
 import pymupdf  # fitz
@@ -51,11 +51,23 @@ DEFAULT_SAFETY_SETTINGS = {
 }
 
 def get_all_configs():
-    """Busca todas as configurações do Vercel Edge Config."""
+    """Busca todas as configurações do Vercel Edge Config usando a API REST."""
+    edge_config_url = os.environ.get('EDGE_CONFIG')
+    edge_config_token = os.environ.get('VERCEL_EDGE_CONFIG_TOKEN')
+
+    if not edge_config_url or not edge_config_token:
+        logger.warning("Edge Config env vars not found. Using default configs.")
+        return {
+            'system_instruction': "You are a helpful assistant.",
+            'safety_settings': DEFAULT_SAFETY_SETTINGS
+        }
+
+    headers = {'Authorization': f'Bearer {edge_config_token}'}
+
     try:
-        client = get_edge_config_client()
-        configs = client.get_all(['system_instruction', 'safety_settings'])
-        # Fornecer padrões se não estiverem definidos
+        response = requests.get(f"{edge_config_url}/items", headers=headers, params={'keys': ['system_instruction', 'safety_settings']})
+        response.raise_for_status()
+        configs = response.json()
         configs.setdefault('system_instruction', "You are a helpful assistant.")
         configs.setdefault('safety_settings', DEFAULT_SAFETY_SETTINGS)
         return configs
@@ -67,10 +79,27 @@ def get_all_configs():
         }
 
 def save_config_item(key, value):
-    """Salva um item de configuração no Vercel Edge Config."""
+    """Salva um item de configuração no Vercel Edge Config usando a API REST."""
+    edge_config_url = os.environ.get('EDGE_CONFIG')
+    edge_config_token = os.environ.get('VERCEL_EDGE_CONFIG_TOKEN')
+
+    if not edge_config_url or not edge_config_token:
+        logger.error("Edge Config env vars not found. Cannot save config.")
+        return False
+
+    headers = {
+        'Authorization': f'Bearer {edge_config_token}',
+        'Content-Type': 'application/json'
+    }
+    payload = {
+        "items": [
+            {"operation": "update", "key": key, "value": value}
+        ]
+    }
+
     try:
-        client = get_edge_config_client()
-        client.set(key, value)
+        response = requests.patch(f"{edge_config_url}/items", headers=headers, json=payload)
+        response.raise_for_status()
         logger.info(f"Config item '{key}' saved to Edge Config.")
         return True
     except Exception as e:
