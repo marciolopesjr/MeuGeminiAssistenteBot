@@ -535,6 +535,21 @@ def admin_panel():
     )
 
 
+# --- Helpers ---
+
+async def send_safe_message(chat_id: int, text: str, **kwargs):
+    """
+    Envia uma mensagem de forma segura, criando uma instância de bot temporária
+    para evitar conflitos de event loop no ambiente serverless.
+    """
+    try:
+        temp_bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
+        async with temp_bot:
+            await temp_bot.send_message(chat_id=chat_id, text=text, **kwargs)
+        logger.info(f"Mensagem enviada com sucesso para o chat {chat_id}.")
+    except Exception as e:
+        logger.error(f"Falha ao enviar mensagem segura para o chat {chat_id}: {e}", exc_info=True)
+
 # --- Manipuladores de Mensagens (Handlers) ---
 
 async def start(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
@@ -551,8 +566,7 @@ async def start(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
         "- Analisar e resumir documentos PDF.\n\n"
         "Basta me enviar qualquer um desses tipos de mídia e eu farei o meu melhor para ajudar!"
     )
-    await context.bot.send_message(chat_id=chat_id, text=welcome_message)
-    logger.info(f"Mensagem de boas-vindas enviada para o chat {chat_id}.")
+    await send_safe_message(chat_id=chat_id, text=welcome_message)
 
 
 async def handle_text(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
@@ -565,18 +579,17 @@ async def handle_text(update: telegram.Update, context: ContextTypes.DEFAULT_TYP
         response = model.generate_content(text)
         logger.info("Resposta da API Gemini recebida.")
 
-        await context.bot.send_message(chat_id=chat_id, text=response.text)
-        logger.info(f"Resposta de texto enviada para o chat {chat_id}.")
+        await send_safe_message(chat_id=chat_id, text=response.text)
     except Exception as e:
         logger.error(f"Erro no handler de texto: {e}", exc_info=True)
-        await context.bot.send_message(chat_id=chat_id, text="Desculpe, ocorreu um erro ao processar sua mensagem.")
+        await send_safe_message(chat_id=chat_id, text="Desculpe, ocorreu um erro ao processar sua mensagem.")
 
 async def handle_photo(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     logger.info(f"Handler 'photo' ativado para o chat {chat_id}.")
 
     try:
-        await context.bot.send_message(chat_id=chat_id, text="Analisando a imagem...")
+        await send_safe_message(chat_id=chat_id, text="Analisando a imagem...")
         photo_file = await context.bot.get_file(update.message.photo[-1].file_id)
 
         f = io.BytesIO()
@@ -590,11 +603,10 @@ async def handle_photo(update: telegram.Update, context: ContextTypes.DEFAULT_TY
         response = model.generate_content([prompt_text, img])
         logger.info("Resposta da API Gemini recebida.")
 
-        await context.bot.send_message(chat_id=chat_id, text=response.text)
-        logger.info(f"Descrição da imagem enviada para o chat {chat_id}.")
+        await send_safe_message(chat_id=chat_id, text=response.text)
     except Exception as e:
         logger.error(f"Erro no handler de foto: {e}", exc_info=True)
-        await context.bot.send_message(chat_id=chat_id, text="Desculpe, ocorreu um erro ao analisar a imagem.")
+        await send_safe_message(chat_id=chat_id, text="Desculpe, ocorreu um erro ao analisar a imagem.")
 
 async def handle_media(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE, media_type: str):
     chat_id = update.message.chat.id
@@ -618,8 +630,9 @@ async def handle_media(update: telegram.Update, context: ContextTypes.DEFAULT_TY
             logger.warning(f"Tipo de mídia desconhecido em handle_media: {media_type}")
             return
 
-        await context.bot.send_message(chat_id=chat_id, text=processing_message)
+        await send_safe_message(chat_id=chat_id, text=processing_message)
 
+        # O get_file precisa usar o bot do contexto, pois está relacionado ao update.
         tg_file = await context.bot.get_file(file_id)
         file_path = f"/tmp/{file_id}.{file_extension}"
         logger.info(f"Baixando arquivo para {file_path}...")
@@ -634,12 +647,11 @@ async def handle_media(update: telegram.Update, context: ContextTypes.DEFAULT_TY
         response = model.generate_content([prompt, gemini_file])
         logger.info(f"Resposta da API Gemini recebida.")
 
-        await context.bot.send_message(chat_id=chat_id, text=f"Análise do {media_type}:\n{response.text}")
-        logger.info(f"Análise de {media_type} enviada para o chat {chat_id}.")
+        await send_safe_message(chat_id=chat_id, text=f"Análise do {media_type}:\n{response.text}")
 
     except Exception as e:
         logger.error(f"Erro no handler de {media_type}: {e}", exc_info=True)
-        await context.bot.send_message(chat_id=chat_id, text=f"Desculpe, ocorreu um erro ao processar o {media_type}.")
+        await send_safe_message(chat_id=chat_id, text=f"Desculpe, ocorreu um erro ao processar o {media_type}.")
 
     finally:
         if file_path and os.path.exists(file_path):
@@ -655,15 +667,16 @@ async def handle_document(update: telegram.Update, context: ContextTypes.DEFAULT
 
     if document.mime_type != 'application/pdf':
         logger.warning(f"Usuário {chat_id} enviou arquivo com MimeType incorreto: {document.mime_type}")
-        await context.bot.send_message(chat_id=chat_id, text="Por favor, envie um arquivo no formato PDF.")
+        await send_safe_message(chat_id=chat_id, text="Por favor, envie um arquivo no formato PDF.")
         return
 
     logger.info(f"Handler 'document' (PDF) ativado para o chat {chat_id}: {document.file_name}")
 
     try:
-        await context.bot.send_message(chat_id=chat_id, text=f"Analisando o PDF '{document.file_name}'...")
+        await send_safe_message(chat_id=chat_id, text=f"Analisando o PDF '{document.file_name}'...")
 
         logger.info("Baixando arquivo PDF para a memória...")
+        # O get_file precisa usar o bot do contexto.
         doc_file = await context.bot.get_file(document.file_id)
         pdf_bytes = io.BytesIO()
         await doc_file.download_to_memory(pdf_bytes)
@@ -677,7 +690,7 @@ async def handle_document(update: telegram.Update, context: ContextTypes.DEFAULT
 
         if not extracted_text.strip():
             logger.warning(f"O PDF '{document.file_name}' não contém texto extraível.")
-            await context.bot.send_message(chat_id=chat_id, text="O PDF parece não conter texto extraível.")
+            await send_safe_message(chat_id=chat_id, text="O PDF parece não conter texto extraível.")
             return
 
         prompt = f"Resuma o seguinte texto extraído de um documento PDF. Identifique os pontos principais e conclusões:\n\n{extracted_text[:10000]}" # Limita o tamanho do prompt
@@ -691,27 +704,41 @@ async def handle_document(update: telegram.Update, context: ContextTypes.DEFAULT
         logger.info(f"Enviando resumo do PDF para o chat {chat_id}.")
         # Telegram tem um limite de 4096 caracteres por mensagem
         for i in range(0, len(response_text), 4096):
-            await context.bot.send_message(chat_id=chat_id, text=response_text[i:i+4096])
+            await send_safe_message(chat_id=chat_id, text=response_text[i:i+4096])
         logger.info("Resumo do PDF enviado com sucesso.")
 
     except Exception as e:
         logger.error(f"Erro no handler de documento: {e}", exc_info=True)
-        await context.bot.send_message(chat_id=chat_id, text="Desculpe, ocorreu um erro ao analisar o PDF.")
+        await send_safe_message(chat_id=chat_id, text="Desculpe, ocorreu um erro ao analisar o PDF.")
 
 # --- Manipulador de Erros ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Loga o erro e envia uma notificação para o desenvolvedor."""
     logger.error("Exceção ao manipular uma atualização:", exc_info=context.error)
+
     tb_list = traceback.format_exception(None, context.error, context.error.__traceback__)
     tb_string = "".join(tb_list)
+
     update_str = update.to_dict() if isinstance(update, telegram.Update) else str(update)
+
+    # Trunca a mensagem para evitar o erro 'Message is too long'
+    max_len = 3800 # Deixa uma margem de segurança
+    error_details = (
+        f"update = {json.dumps(update_str, indent=2, ensure_ascii=False)}\n\n"
+        f"context.chat_data = {str(context.chat_data)}\n\n"
+        f"context.user_data = {str(context.user_data)}\n\n"
+        f"{tb_string}"
+    )
+    truncated_details = (error_details[:max_len] + '...') if len(error_details) > max_len else error_details
+
     message = (
         "Ocorreu uma exceção ao manipular uma atualização\n\n"
-        f"<pre>update = {html.escape(json.dumps(update_str, indent=2, ensure_ascii=False))}</pre>\n\n"
-        f"<pre>{html.escape(tb_string)}</pre>"
+        f"<pre>{html.escape(truncated_details)}</pre>"
     )
+
     if DEVELOPER_CHAT_ID:
-        await context.bot.send_message(
-            chat_id=DEVELOPER_CHAT_ID, text=message, parse_mode=telegram.constants.ParseMode.HTML
+        await send_safe_message(
+            chat_id=int(DEVELOPER_CHAT_ID), text=message, parse_mode=telegram.constants.ParseMode.HTML
         )
 
 # --- Registro dos Handlers ---
