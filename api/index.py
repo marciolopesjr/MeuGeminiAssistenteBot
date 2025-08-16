@@ -9,7 +9,7 @@ import io
 from flask import Flask, request
 from dotenv import load_dotenv
 import telegram
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import google.generativeai as genai
 import PIL.Image
 import pymupdf  # fitz
@@ -45,6 +45,22 @@ app = Flask(__name__)
 
 
 # --- Manipuladores de Mensagens (Handlers) ---
+
+async def start(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
+    """Envia uma mensagem de boas-vindas quando o comando /start é emitido."""
+    chat_id = update.message.chat.id
+    welcome_message = (
+        "Olá! Eu sou seu assistente multimodal com a tecnologia Gemini.\n\n"
+        "Posso fazer o seguinte:\n"
+        "- Conversar com você em texto.\n"
+        "- Descrever imagens que você me enviar.\n"
+        "- Transcrever mensagens de voz e arquivos de áudio.\n"
+        "- Resumir vídeos.\n"
+        "- Analisar e resumir documentos PDF.\n\n"
+        "Basta me enviar qualquer um desses tipos de mídia e eu farei o meu melhor para ajudar!"
+    )
+    await context.bot.send_message(chat_id=chat_id, text=welcome_message)
+
 
 async def handle_text(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
@@ -157,6 +173,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # --- Registro dos Handlers ---
+application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, lambda u, c: handle_media(u, c, 'audio')))
