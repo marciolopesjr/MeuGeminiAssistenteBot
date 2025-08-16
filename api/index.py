@@ -5,8 +5,9 @@ import html
 import json
 import traceback
 import io
+import time
 
-from flask import Flask, request, render_template_string, session, redirect, url_for, flash
+from flask import Flask, request, render_template_string, session, redirect, url_for, flash, jsonify
 import functools
 from dotenv import load_dotenv
 import telegram
@@ -171,7 +172,55 @@ ADMIN_PANEL_TEMPLATE = """
         <input type="submit" value="Clear History">
       </form>
     </div>
+
+    <div class="card" id="webhook-card">
+        <h2>Webhook Status</h2>
+        <button id="check-webhook-btn">Check Webhook Status Now</button>
+        <pre id="webhook-info-pre" style="background: #eef; padding: 1em; border-radius: 4px; white-space: pre-wrap; word-wrap: break-word; margin-top: 1em;">Click the button to fetch webhook info...</pre>
+    </div>
+
+    <div class="card" id="simulator-card">
+        <h2>Message Simulator (Text Only)</h2>
+        <form action="{{ url_for('simulate_message') }}" method="post">
+            <input type="hidden" name="message_type" value="text">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1em;">
+                <div>
+                    <label for="sim_chat_id">Chat ID:</label>
+                    <input type="text" id="sim_chat_id" name="chat_id" value="{{ developer_chat_id or '' }}" required>
+                </div>
+                <div>
+                    <label for="sim_user_id">User ID:</label>
+                    <input type="text" id="sim_user_id" name="user_id" value="{{ developer_chat_id or '' }}" required>
+                </div>
+            </div>
+            <div>
+                <label for="sim_username">Username:</label>
+                <input type="text" id="sim_username" name="username" value="AdminSimulator">
+            </div>
+            <div>
+                <label for="sim_text">Message Text:</label>
+                <textarea id="sim_text" name="text" required style="width:100%; min-height: 60px; box-sizing: border-box;">Hello from the simulator!</textarea>
+            </div>
+            <div style="margin-top: 1em;">
+                <input type="submit" value="Simulate Text Message">
+            </div>
+        </form>
+    </div>
   </div>
+  <script>
+    document.getElementById('check-webhook-btn').addEventListener('click', function() {
+        const pre = document.getElementById('webhook-info-pre');
+        pre.textContent = 'Fetching...';
+        fetch('{{ url_for("get_webhook_info") }}')
+            .then(response => response.json())
+            .then(data => {
+                pre.textContent = JSON.stringify(data, null, 2);
+            })
+            .catch(error => {
+                pre.textContent = 'Error fetching webhook info: ' + error;
+            });
+    });
+  </script>
 </body>
 </html>
 """
@@ -210,6 +259,78 @@ def logout():
     session.pop('logged_in', None)
     flash("Você foi desconectado.", "info")
     return redirect(url_for('login'))
+
+async def get_webhook_info_data():
+    """Busca as informações do webhook."""
+    try:
+        temp_bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
+        async with temp_bot:
+            webhook_info = await temp_bot.get_webhook_info()
+            return webhook_info.to_dict()
+    except Exception as e:
+        logger.error(f"Falha ao buscar informações do webhook: {e}", exc_info=True)
+        return {"error": str(e)}
+
+@app.route('/admin/webhook_info')
+@login_required
+def get_webhook_info():
+    """Endpoint da API para fornecer informações do webhook."""
+    data = asyncio.run(get_webhook_info_data())
+    return jsonify(data)
+
+@app.route('/admin/simulate', methods=['POST'])
+@login_required
+def simulate_message():
+    """Simula o recebimento de uma mensagem do Telegram."""
+    try:
+        form_data = request.form
+        message_type = form_data.get('message_type')
+
+        # Construir um payload de atualização falso
+        # Usamos um update_id e message_id aleatórios
+        update_id = int(time.time() * 1000)
+        message_id = int(time.time() * 1000)
+        chat_id = int(form_data.get('chat_id'))
+        user_id = int(form_data.get('user_id'))
+
+        fake_update_payload = {
+            "update_id": update_id,
+            "message": {
+                "message_id": message_id,
+                "date": int(time.time()),
+                "chat": {
+                    "id": chat_id,
+                    "type": "private",
+                    "username": form_data.get('username')
+                },
+                "from": {
+                    "id": user_id,
+                    "is_bot": False,
+                    "first_name": form_data.get('username'),
+                    "username": form_data.get('username')
+                }
+            }
+        }
+
+        if message_type == 'text':
+            fake_update_payload['message']['text'] = form_data.get('text')
+        else:
+            flash(f"Tipo de mensagem simulada '{message_type}' ainda não é suportado.", "error")
+            return redirect(url_for('admin_panel'))
+
+        logger.info(f"Simulando uma atualização de mensagem: {json.dumps(fake_update_payload, indent=2)}")
+
+        # Criar o objeto Update e processá-lo
+        update = telegram.Update.de_json(fake_update_payload, application.bot)
+        asyncio.run(application.process_update(update))
+
+        flash("Mensagem de texto simulada foi enviada para o processador do bot.", "success")
+
+    except Exception as e:
+        logger.error(f"Erro ao simular mensagem: {e}", exc_info=True)
+        flash(f"Erro ao simular a mensagem: {e}", "error")
+
+    return redirect(url_for('admin_panel'))
 
 async def check_api_status():
     """Verifica o status das conexões com as APIs do Telegram e Gemini."""
@@ -372,7 +493,8 @@ def admin_panel():
         ADMIN_PANEL_TEMPLATE,
         status_content=status_content,
         send_message_form=send_message_form,
-        chat_content=chat_content
+        chat_content=chat_content,
+        developer_chat_id=DEVELOPER_CHAT_ID
     )
 
 
