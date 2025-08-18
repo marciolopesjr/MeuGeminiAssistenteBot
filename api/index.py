@@ -61,6 +61,12 @@ FLASK_SECRET_KEY = os.environ.get('FLASK_SECRET_KEY')
 ADMIN_USER = os.environ.get('ADMIN_USER')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD')
 
+# Armazenamento de fallback para o histórico de chat.
+# ATENÇÃO: Em um ambiente serverless como a Vercel, este dicionário pode ser resetado
+# a qualquer momento entre as invocações da função. Ele serve apenas como um
+# fallback temporário e não garante a persistência dos dados.
+temporary_chat_contexts = {}
+
 
 if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
     raise ValueError("As variáveis de ambiente TELEGRAM_BOT_TOKEN e GEMINI_API_KEY são obrigatórias.")
@@ -102,6 +108,28 @@ def get_all_configs():
             'safety_settings': DEFAULT_SAFETY_SETTINGS
         }
 
+def get_config_item(key: str):
+    """Busca um item de configuração específico do Vercel Edge Config."""
+    edge_config_url = os.environ.get('EDGE_CONFIG')
+    edge_config_token = os.environ.get('VERCEL_EDGE_CONFIG_TOKEN')
+
+    if not edge_config_url or not edge_config_token:
+        logger.warning(f"Edge Config env vars not found. Cannot get item '{key}'.")
+        return None
+
+    headers = {'Authorization': f'Bearer {edge_config_token}'}
+
+    try:
+        response = requests.get(f"{edge_config_url}/item/{key}", headers=headers)
+        if response.status_code == 404:
+            logger.info(f"Config item '{key}' not found in Edge Config.")
+            return None
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        logger.error(f"Could not fetch item '{key}' from Edge Config: {e}")
+        return None
+
 def save_config_item(key, value):
     """Salva um item de configuração no Vercel Edge Config usando a API REST."""
     edge_config_url = os.environ.get('EDGE_CONFIG')
@@ -129,6 +157,68 @@ def save_config_item(key, value):
     except Exception as e:
         logger.error(f"Could not save to Edge Config: {e}", exc_info=True)
         return False
+
+def delete_config_item(key: str):
+    """Deleta um item de configuração no Vercel Edge Config."""
+    edge_config_url = os.environ.get('EDGE_CONFIG')
+    edge_config_token = os.environ.get('VERCEL_EDGE_CONFIG_TOKEN')
+
+    if not edge_config_url or not edge_config_token:
+        logger.error("Edge Config env vars not found. Cannot delete config.")
+        return False
+
+    headers = {
+        'Authorization': f'Bearer {edge_config_token}',
+        'Content-Type': 'application/json'
+    }
+    payload = {
+        "items": [
+            {"operation": "delete", "key": key}
+        ]
+    }
+
+    try:
+        response = requests.patch(f"{edge_config_url}/items", headers=headers, json=payload)
+        response.raise_for_status()
+        logger.info(f"Config item '{key}' deleted from Edge Config.")
+        return True
+    except Exception as e:
+        logger.error(f"Could not delete from Edge Config: {e}", exc_info=True)
+        return False
+
+def get_chat_context(chat_id: int) -> list:
+    """
+    Busca o histórico de chat.
+    Tenta primeiro o Edge Config, depois o fallback em memória.
+    """
+    context_key = f"context_{chat_id}"
+    context = get_config_item(context_key)
+    if context is not None:
+        logger.info(f"Contexto para o chat {chat_id} encontrado no Edge Config.")
+        return context
+
+    # Fallback para o armazenamento em memória
+    if chat_id in temporary_chat_contexts:
+        logger.info(f"Contexto para o chat {chat_id} encontrado no armazenamento temporário.")
+        return temporary_chat_contexts[chat_id]
+
+    logger.info(f"Nenhum contexto encontrado para o chat {chat_id}.")
+    return []
+
+def save_chat_context(chat_id: int, context: list):
+    """
+    Salva o histórico de chat.
+    Tenta primeiro o Edge Config, se falhar, usa o fallback em memória.
+    """
+    context_key = f"context_{chat_id}"
+    if save_config_item(context_key, context):
+        logger.info(f"Contexto para o chat {chat_id} salvo no Edge Config.")
+        # Se o salvamento no Edge Config for bem-sucedido, remove do fallback
+        if chat_id in temporary_chat_contexts:
+            del temporary_chat_contexts[chat_id]
+    else:
+        logger.warning(f"Falha ao salvar no Edge Config. Usando armazenamento temporário para o chat {chat_id}.")
+        temporary_chat_contexts[chat_id] = context
 
 # --- Inicialização dos Serviços ---
 # API Gemini
@@ -676,21 +766,76 @@ async def start(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
     await send_safe_message(chat_id=chat_id, text=welcome_message)
 
 
+async def clear_context(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
+    """Limpa o histórico de conversas do usuário."""
+    chat_id = update.message.chat.id
+    logger.info(f"Handler 'clear' ativado para o chat {chat_id}.")
+    context_key = f"context_{chat_id}"
+
+    # Deletar do Edge Config
+    deleted_from_edge = delete_config_item(context_key)
+
+    # Deletar do fallback em memória
+    if chat_id in temporary_chat_contexts:
+        del temporary_chat_contexts[chat_id]
+        logger.info(f"Contexto para o chat {chat_id} deletado do armazenamento temporário.")
+
+    if deleted_from_edge:
+        message = "Seu histórico de conversa foi limpo com sucesso."
+    else:
+        message = "Seu histórico de conversa foi limpo da memória temporária, mas pode não ter sido removido do armazenamento persistente."
+
+    await send_safe_message(chat_id=chat_id, text=message)
+
+
 async def handle_text(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     text = update.message.text
     logger.info(f"Handler 'text' ativado para o chat {chat_id}: '{text}'")
 
     try:
+        # 1. Obter o histórico do chat
+        chat_history = get_chat_context(chat_id)
+
+        # 2. Adicionar a nova mensagem do usuário ao histórico
+        # O formato esperado pela API do Gemini é uma lista de dicionários
+        chat_history.append({"role": "user", "parts": [{"text": text}]})
+
+        # 3. Limitar o tamanho do histórico para evitar exceder os limites da API
+        # Manter as últimas 10 trocas (usuário + modelo)
+        if len(chat_history) > 20:
+            chat_history = chat_history[-20:]
+            logger.info(f"Histórico para o chat {chat_id} truncado para 20 itens.")
+
         configs = get_all_configs()
         model = genai.GenerativeModel(
             'gemini-1.5-flash',
             system_instruction=configs.get('system_instruction'),
             safety_settings=configs.get('safety_settings')
         )
-        logger.info("Enviando prompt de texto para a API Gemini...")
-        response = model.generate_content(text)
-        logger.info("Resposta da API Gemini recebida.")
+
+        # A API do Gemini espera um histórico que não termine com uma mensagem do usuário,
+        # então removemos a última mensagem que acabamos de adicionar para passar para `start_chat`.
+        initial_history = chat_history[:-1]
+
+        # Iniciar uma sessão de chat com o histórico
+        chat_session = model.start_chat(history=initial_history)
+
+        logger.info(f"Enviando prompt com histórico para a API Gemini para o chat {chat_id}...")
+        # Agora enviamos apenas a nova mensagem do usuário
+        response = chat_session.send_message(text)
+        logger.info(f"Resposta da API Gemini recebida para o chat {chat_id}.")
+
+        # 4. A biblioteca `google-generativeai` atualiza `chat_session.history` automaticamente.
+        # Apenas precisamos converter para um formato serializável em JSON.
+        # O formato de `chat_session.history` já é o correto para ser usado na próxima chamada.
+        serializable_history = [
+            {'role': msg.role, 'parts': [{'text': part.text} for part in msg.parts]}
+            for msg in chat_session.history
+        ]
+
+        # 5. Salvar o histórico atualizado
+        save_chat_context(chat_id, serializable_history)
 
         await send_safe_message(chat_id=chat_id, text=response.text)
     except Exception as e:
@@ -871,6 +1016,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Registro dos Handlers ---
 application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("clear", clear_context))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, lambda u, c: handle_media(u, c, 'audio')))
